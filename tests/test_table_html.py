@@ -620,11 +620,12 @@ async def test_table_html_row_links_for_null_and_empty_primary_keys():
     await db.execute_write_script("""
         create table items (id text primary key, title text);
         insert into items (id, title) values (null, 'null-pk'), ('', 'empty-pk');
+        create table item_references (item_id text references items(id));
         create table without_rowid (id text primary key, title text) without rowid;
         insert into without_rowid (id, title) values ('ordinary', 'without-rowid');
         """)
     try:
-        response = await ds.client.get("/data/items")
+        response = await ds.client.get("/data/items?_sort=title")
         assert response.status_code == 200
         soup = Soup(response.text, "html.parser")
         rows = {
@@ -649,6 +650,11 @@ async def test_table_html_row_links_for_null_and_empty_primary_keys():
             )
             expected.append((200, [{"id": pk_value, "title": title}]))
         assert actual == expected
+
+        null_row_href = rows["null-pk"].select_one("td a")["href"]
+        null_row_page = await ds.client.get(null_row_href)
+        assert null_row_page.status_code == 200
+        assert "null-pk" in null_row_page.text
 
         response = await ds.client.get("/data/without_rowid")
         assert response.status_code == 200

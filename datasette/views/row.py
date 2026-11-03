@@ -677,7 +677,7 @@ class RowView(BaseView):
         )
 
     async def foreign_key_tables(self, database, table, pk_values, *, actor):
-        if len(pk_values) != 1:
+        if len(pk_values) != 1 or any(value is None for value in pk_values):
             return []
         db = self.ds.databases[database]
         all_foreign_keys = await db.get_all_foreign_keys()
