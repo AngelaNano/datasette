@@ -27,6 +27,7 @@ class TableExtraContext:
     table_name: str
     is_view: bool
     private: bool
+    rowid_path_column: str | None
     rows: list
     columns: list
     results_description: list
@@ -574,6 +575,7 @@ class DisplayColumnsAndRowsProvider(Provider):
             truncate_cells=context.datasette.setting("truncate_cells_html"),
             sortable_columns=context.sortable_columns,
             request=context.request,
+            rowid_path_column=context.rowid_path_column,
         )
         return {
             "columns": display_columns,

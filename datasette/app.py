@@ -85,6 +85,7 @@ from .utils import (
     redact_keys,
     resolve_env_secrets,
     resolve_routes,
+    row_urlsafe_components,
     row_sql_params_pks,
     sha256_file,
     tilde_decode,
@@ -3038,7 +3039,7 @@ ORDER BY allowed.parent, allowed.child
 
     async def resolve_row(self, request):
         db, table_name, _ = await self.resolve_table(request)
-        pk_values = urlsafe_components(request.url_vars["pks"])
+        pk_values = row_urlsafe_components(request.url_vars["pks"])
         sql, params, pks = await row_sql_params_pks(db, table_name, pk_values)
         if len(pk_values) != len(pks):
             raise BadRequest(
