@@ -612,6 +612,59 @@ async def test_table_html_simple_primary_key(ds_client):
 
 
 @pytest.mark.asyncio
+async def test_table_html_row_links_for_null_and_empty_primary_keys():
+    ds = Datasette([])
+    db = ds.add_database(
+        Database(ds, memory_name="null_and_empty_primary_keys"), name="data"
+    )
+    await db.execute_write_script("""
+        create table items (id text primary key, title text);
+        insert into items (id, title) values (null, 'null-pk'), ('', 'empty-pk');
+        create table without_rowid (id text primary key, title text) without rowid;
+        insert into without_rowid (id, title) values ('ordinary', 'without-rowid');
+        """)
+    try:
+        response = await ds.client.get("/data/items")
+        assert response.status_code == 200
+        soup = Soup(response.text, "html.parser")
+        rows = {
+            row.select_one("td.col-title").get_text(strip=True): row
+            for row in soup.select("table.rows-and-columns tbody tr")
+        }
+
+        actual = []
+        expected = []
+        for title, pk_value in (("null-pk", None), ("empty-pk", "")):
+            href = rows[title].select_one("td a")["href"]
+            row_response = await ds.client.get(
+                f"{href.rstrip('/')}.json?_shape=objects"
+            )
+            actual.append(
+                (
+                    row_response.status_code,
+                    row_response.json().get("rows")
+                    if row_response.status_code == 200
+                    else None,
+                )
+            )
+            expected.append((200, [{"id": pk_value, "title": title}]))
+        assert actual == expected
+
+        response = await ds.client.get("/data/without_rowid")
+        assert response.status_code == 200
+        href = Soup(response.text, "html.parser").select_one(
+            "table.rows-and-columns tbody tr td a"
+        )["href"]
+        assert href == "/data/without_rowid/ordinary"
+        row_response = await ds.client.get(f"{href}.json?_shape=objects")
+        assert row_response.json()["rows"] == [
+            {"id": "ordinary", "title": "without-rowid"}
+        ]
+    finally:
+        ds.close()
+
+
+@pytest.mark.asyncio
 async def test_table_csv_json_export_interface(ds_client):
     response = await ds_client.get("/fixtures/simple_primary_key?id__gt=2")
     assert response.status_code == 200

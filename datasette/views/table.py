@@ -43,6 +43,7 @@ from datasette.utils import (
     path_with_format,
     path_with_removed_args,
     path_with_replaced_args,
+    rowid_column_for_table,
     sqlite3,
     tilde_encode,
     to_css_class,
@@ -645,6 +646,7 @@ async def display_columns_and_rows(
     truncate_cells=0,
     sortable_columns=None,
     request=None,
+    rowid_path_column=None,
 ):
     """Returns columns, rows for specified table - including fancy foreign key treatment"""
     sortable_columns = sortable_columns or set()
@@ -718,12 +720,17 @@ async def display_columns_and_rows(
     base_url = datasette.setting("base_url")
     for row in rows:
         cells = []
+        plugin_row = row
+        if rowid_path_column:
+            plugin_row = {column["name"]: row[column["name"]] for column in columns}
         # Unless we are a view, the first column is a link - either to the rowid
         # or to the simple or compound primary key
         if link_column:
             is_special_link_column = len(pks) != 1
             pk_path = path_from_row_pks(row, pks, not pks, False)
-            row_path = path_from_row_pks(row, pks, not pks)
+            row_path = path_from_row_pks(
+                row, pks, not pks, rowid_column=rowid_path_column
+            )
             row_label = row_label_from_label_column(row, label_column)
             row_action_label = pk_path
             if row_label and row_label != pk_path:
@@ -808,7 +815,7 @@ async def display_columns_and_rows(
                     plugin_display_value = candidate
             if plugin_display_value is None:
                 for candidate in pm.hook.render_cell(
-                    row=row,
+                    row=plugin_row,
                     value=value,
                     column=column,
                     table=table_name,
@@ -2084,6 +2091,18 @@ async def table_view_data(
     specified_columns = await _columns_to_select(table_columns, pks, request)
     select_specified_columns = ", ".join(escape_sqlite(t) for t in specified_columns)
     select_all_columns = ", ".join(escape_sqlite(t) for t in table_columns)
+    rowid_column = None
+    rowid_path_column = None
+    if context_for_html_hack and pks and not is_view:
+        rowid_column = await rowid_column_for_table(db, table_name, table_columns)
+        if rowid_column:
+            rowid_path_column = "__datasette_rowid__"
+            table_column_names = {column.casefold() for column in table_columns}
+            while rowid_path_column.casefold() in table_column_names:
+                rowid_path_column += "_"
+            select_specified_columns += (
+                f", {rowid_column} as {escape_sqlite(rowid_path_column)}"
+            )
 
     # rowid tables (no specified primary key) need a different SELECT
     use_rowid = not pks and not is_view
@@ -2246,6 +2265,11 @@ async def table_view_data(
 
     # This is the SQL that populates the main table on the page
     sql = f"select {select_specified_columns} from {escape_sqlite(table_name)} {where_clause}{order_by} limit {page_size + 1}{offset}"
+    public_sql = sql
+    if rowid_path_column:
+        public_sql = public_sql.replace(
+            f", {rowid_column} as {escape_sqlite(rowid_path_column)}", "", 1
+        )
 
     if request.args.get("_timelimit"):
         extra_args["custom_time_limit"] = int(request.args.get("_timelimit"))
@@ -2358,6 +2382,12 @@ async def table_view_data(
             extras.update(values)
         extras.discard(f"_{key}")
 
+    public_columns = [column for column in columns if column != rowid_path_column]
+    public_description = [
+        description
+        for description in results.description
+        if description[0] != rowid_path_column
+    ]
     table_extra_context = TableExtraContext(
         datasette=datasette,
         request=request,
@@ -2367,9 +2397,10 @@ async def table_view_data(
         table_name=table_name,
         is_view=is_view,
         private=private,
+        rowid_path_column=rowid_path_column,
         rows=rows,
-        columns=columns,
-        results_description=results.description,
+        columns=public_columns,
+        results_description=public_description,
         table_columns=table_columns,
         pks=pks,
         count_sql=count_sql,
@@ -2380,7 +2411,7 @@ async def table_view_data(
         nosuggest=nosuggest,
         next_arg=request.args.get("_next"),
         next_url=next_url,
-        sql=sql,
+        sql=public_sql,
         sql_no_order_no_limit=sql_no_order_no_limit,
         params=params,
         table_metadata=table_metadata,
@@ -2420,6 +2451,9 @@ async def table_view_data(
                     row_dict[col_name], datasette
                 )
         transformed_rows.append(row_dict)
+    if rowid_path_column:
+        for row in transformed_rows:
+            row.pop(rowid_path_column, None)
     data["rows"] = transformed_rows
 
     if context_for_html_hack:
@@ -2430,7 +2464,9 @@ async def table_view_data(
         # filter_columns combine the columns we know are available
         # in the table with any additional columns (such as rowid)
         # which are available in the query
-        data["filter_columns"] = list(columns) + [
+        data["filter_columns"] = [
+            column for column in columns if column != rowid_path_column
+        ] + [
             table_column
             for table_column in table_columns
             if table_column not in columns
@@ -2488,7 +2524,20 @@ async def table_view_data(
             table_alter_ui=table_alter_ui,
         )
 
-    return data, rows[:page_size], columns, expanded_columns, sql, next_url
+    public_rows = rows[:page_size]
+    if rowid_path_column:
+        public_rows = [
+            CustomRow(
+                [column for column in row.keys() if column != rowid_path_column],
+                [
+                    (column, row[column])
+                    for column in row.keys()
+                    if column != rowid_path_column
+                ],
+            )
+            for row in public_rows
+        ]
+    return data, public_rows, public_columns, expanded_columns, public_sql, next_url
 
 
 async def _next_value_and_url(

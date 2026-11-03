@@ -294,7 +294,38 @@ def urlsafe_components(token):
     return [tilde_decode(b) for b in token.split(",")]
 
 
-def path_from_row_pks(row, pks, use_rowid, quote=True):
+EMPTY_ROW_PATH_COMPONENT = "~e"
+ROWID_ROW_PATH_PREFIX = "~r"
+
+
+def row_urlsafe_components(token):
+    """Decode row path components, including the tagged empty-key component."""
+    return [
+        "" if component == EMPTY_ROW_PATH_COMPONENT else tilde_decode(component)
+        for component in token.split(",")
+    ]
+
+
+async def rowid_column_for_table(db, table, table_columns=None):
+    """Return an accessible hidden-rowid alias, or None for WITHOUT ROWID tables."""
+    if table_columns is None:
+        table_columns = await db.table_columns(table)
+    table_columns = {column.casefold() for column in table_columns}
+    for candidate in ("rowid", "_rowid_", "oid"):
+        if candidate in table_columns:
+            continue
+        try:
+            await db.execute(
+                f"select {candidate} from {escape_sqlite(table)} limit 0",
+                log_sql_errors=False,
+            )
+        except sqlite3.DatabaseError:
+            continue
+        return candidate
+    return None
+
+
+def path_from_row_pks(row, pks, use_rowid, quote=True, rowid_column=None):
     """Generate an optionally tilde-encoded unique identifier
     for a row from its primary keys."""
     if use_rowid:
@@ -303,8 +334,13 @@ def path_from_row_pks(row, pks, use_rowid, quote=True):
         bits = [
             row[pk]["value"] if isinstance(row[pk], dict) else row[pk] for pk in pks
         ]
+        if quote and rowid_column and any(bit is None for bit in bits):
+            return f"{ROWID_ROW_PATH_PREFIX}{row[rowid_column]}"
     if quote:
-        bits = [tilde_encode(str(bit)) for bit in bits]
+        bits = [
+            EMPTY_ROW_PATH_COMPONENT if bit == "" else tilde_encode(str(bit))
+            for bit in bits
+        ]
     else:
         bits = [str(bit) for bit in bits]
 

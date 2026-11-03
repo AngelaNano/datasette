@@ -27,6 +27,8 @@ from datasette.utils import (
     path_from_row_pks,
     path_with_format,
     path_with_removed_args,
+    rowid_column_for_table,
+    ROWID_ROW_PATH_PREFIX,
     sqlite3,
     tilde_decode,
     to_css_class,
@@ -426,17 +428,32 @@ class RowView(BaseView):
         # headers, regardless of which output format ends up being rendered.
         request._datasette_private_response = private
 
-        resolved = await self.ds.resolve_row(request)
-        pk_values = resolved.pk_values
-        results = await resolved.db.execute(
-            resolved.sql, resolved.params, truncate=True
-        )
+        row_path_value = request.url_vars["pks"]
+        rowid_path = row_path_value.startswith(ROWID_ROW_PATH_PREFIX)
+        if rowid_path:
+            rowid_value = row_path_value[len(ROWID_ROW_PATH_PREFIX) :]
+            rowid_column = await rowid_column_for_table(db, table)
+            if not rowid_value or rowid_column is None:
+                raise NotFound(f"Record not found: {rowid_value}")
+            sql = (
+                f"select * from {escape_sqlite(table)} "
+                f"where {rowid_column} = :rowid"
+            )
+            params = {"rowid": rowid_value}
+            pks = await db.primary_keys(table)
+        else:
+            resolved = await self.ds.resolve_row(request)
+            sql = resolved.sql
+            params = resolved.params
+            pks = resolved.pks
+            pk_values = resolved.pk_values
+        results = await db.execute(sql, params, truncate=True)
         columns = [r[0] for r in results.description]
         rows = list(results.rows)
         if not rows:
-            raise NotFound(f"Record not found: {pk_values}")
-
-        pks = resolved.pks
+            raise NotFound(f"Record not found: {row_path_value}")
+        if rowid_path:
+            pk_values = [rows[0][pk] for pk in pks]
 
         async def template_data():
             is_table = await db.table_exists(table)
@@ -509,7 +526,11 @@ class RowView(BaseView):
                         )
 
             label_column = await db.label_column_for_table(table) if is_table else None
-            row_path = path_from_row_pks(rows[0], pks, False)
+            row_path = (
+                row_path_value
+                if rowid_path
+                else path_from_row_pks(rows[0], pks, False)
+            )
             pk_path = path_from_row_pks(rows[0], pks, False, False)
             row_label = row_label_from_label_column(expanded_rows[0], label_column)
             for display_row in display_rows:
@@ -604,8 +625,8 @@ class RowView(BaseView):
                     "top_row",
                     self.ds,
                     request,
-                    database=resolved.db.name,
-                    table=resolved.table,
+                    database=database,
+                    table=table,
                     row=rows[0],
                 ),
                 "metadata": {},
@@ -617,7 +638,7 @@ class RowView(BaseView):
             "table": table,
             "rows": rows,
             "columns": columns,
-            "primary_keys": resolved.pks,
+            "primary_keys": pks,
             "primary_key_values": pk_values,
         }
 
@@ -638,8 +659,8 @@ class RowView(BaseView):
             columns=columns,
             pks=pks,
             pk_values=pk_values,
-            sql=resolved.sql,
-            params=resolved.params,
+            sql=sql,
+            params=params,
             extras=extras,
             extra_registry=table_extra_registry,
             foreign_key_tables=self.foreign_key_tables,
